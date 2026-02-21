@@ -49,8 +49,13 @@ _COMMAND_TAG_RE = re.compile(
     re.DOTALL,
 )
 
+# Skip session UUID directories and subagent artifacts
+_SESSION_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
 # ---------------------------------------------------------------------------
-# TASK 1: JSONL Parsing and Turn Construction
+# JSONL parsing and turn construction
 # ---------------------------------------------------------------------------
 
 def _render_tool(block: dict) -> dict:
@@ -333,12 +338,19 @@ def _reparse_turns(jsonl_path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# TASK 2: Multi-Directory Indexing and BM25
+# Multi-directory discovery and BM25 indexing
 # ---------------------------------------------------------------------------
 
 def _discover_directories(pattern: str) -> list[Path]:
-    """Glob ~/.claude/projects/ for subdirectories matching pattern."""
-    matches = sorted(p for p in _PROJECTS_ROOT.glob(pattern) if p.is_dir())
+    """Glob ~/.claude/projects/ for subdirectories matching pattern.
+
+    Filters out session UUID directories (subagent artifacts) that may
+    appear directly under the projects root.
+    """
+    matches = sorted(
+        p for p in _PROJECTS_ROOT.glob(pattern)
+        if p.is_dir() and not _SESSION_UUID_RE.match(p.name)
+    )
     return matches
 
 
@@ -376,52 +388,12 @@ def _derive_project_name(dir_name: str, all_dir_names: list[str]) -> str:
     return result if result else dir_name
 
 
-def _build_index(pattern: str) -> tuple[list[dict], bm25s.BM25 | None, dict[str, dict], dict[str, Path]]:
-    """Build BM25 index across all matching project directories."""
-    directories = _discover_directories(pattern)
-    all_dir_names = [d.name for d in directories]
-
-    corpus: list[dict] = []
-    conversations: dict[str, dict] = {}
-    session_files: dict[str, Path] = {}
-
-    file_count = 0
-    for directory in directories:
-        project = _derive_project_name(directory.name, all_dir_names)
-        for jsonl_path in sorted(directory.glob("*.jsonl")):
-            file_count += 1
-            session_id = jsonl_path.stem
-            turns, metadata = _parse_conversation(jsonl_path)
-
-            # Attach project to each turn
-            for turn in turns:
-                turn["project"] = project
-
-            metadata["project"] = project
-            conversations[session_id] = metadata
-            session_files[session_id] = jsonl_path
-            corpus.extend(turns)
-
-    retriever = None
-    if corpus:
-        corpus_tokens = bm25s.tokenize(
-            [entry["text"] for entry in corpus], stopwords="en"
-        )
-        retriever = bm25s.BM25()
-        retriever.index(corpus_tokens)
-
-    print(
-        f"Indexed {len(directories)} directories, {file_count} files, "
-        f"{len(corpus)} turns, {len(conversations)} sessions",
-        file=sys.stderr,
-    )
-
-    return corpus, retriever, conversations, session_files
-
-
 # ---------------------------------------------------------------------------
 # Core index class
 # ---------------------------------------------------------------------------
+
+# Type alias for the per-file cache entry: (mtime, size, turns, metadata)
+_CacheEntry = tuple[float, int, list[dict], dict]
 
 
 class ConversationIndex:
@@ -433,15 +405,96 @@ class ConversationIndex:
         self._corpus: list[dict] = []
         self._conversations: dict[str, dict] = {}
         self._session_files: dict[str, Path] = {}
+        # Incremental cache: path_str -> (mtime, size, turns, metadata)
+        self._file_cache: dict[str, _CacheEntry] = {}
 
     def build(self, pattern: str) -> None:
-        """Build or rebuild the index from matching directories."""
-        corpus, retriever, conversations, session_files = _build_index(pattern)
+        """Build or rebuild the index from matching directories.
+
+        Uses incremental caching: only reparses JSONL files whose mtime or
+        size changed since the last build. Unchanged files reuse cached
+        parsed turns, avoiding redundant JSON parsing of the full corpus.
+        """
+        # Snapshot the previous cache under lock
+        with self._lock:
+            old_cache = dict(self._file_cache)
+
+        directories = _discover_directories(pattern)
+        all_dir_names = [d.name for d in directories]
+
+        corpus: list[dict] = []
+        conversations: dict[str, dict] = {}
+        session_files: dict[str, Path] = {}
+        new_cache: dict[str, _CacheEntry] = {}
+
+        file_count = 0
+        cache_hits = 0
+
+        for directory in directories:
+            project = _derive_project_name(directory.name, all_dir_names)
+            for jsonl_path in sorted(directory.glob("*.jsonl")):
+                # Skip subagent session files (defensive — glob is non-recursive
+                # so these shouldn't appear, but guard against edge cases)
+                if jsonl_path.name.startswith("agent-"):
+                    continue
+
+                file_count += 1
+                session_id = jsonl_path.stem
+                path_key = str(jsonl_path)
+
+                try:
+                    stat = jsonl_path.stat()
+                    mtime = stat.st_mtime
+                    size = stat.st_size
+                except OSError:
+                    continue
+
+                # Check cache: reuse parsed data if file unchanged
+                cached = old_cache.get(path_key)
+                if cached is not None and cached[0] == mtime and cached[1] == size:
+                    # Shallow-copy each turn dict to avoid mutating cached data
+                    turns = [dict(t) for t in cached[2]]
+                    metadata = dict(cached[3])
+                    cache_hits += 1
+                else:
+                    turns, metadata = _parse_conversation(jsonl_path)
+
+                # Attach project label to turns and metadata
+                for turn in turns:
+                    turn["project"] = project
+                metadata["project"] = project
+
+                # Store original (un-mutated) turns in cache for safe reuse
+                cache_turns = [
+                    {k: v for k, v in t.items() if k != "project"} for t in turns
+                ]
+                new_cache[path_key] = (mtime, size, cache_turns, metadata)
+                conversations[session_id] = metadata
+                session_files[session_id] = jsonl_path
+                corpus.extend(turns)
+
+        retriever = None
+        if corpus:
+            corpus_tokens = bm25s.tokenize(
+                [entry["text"] for entry in corpus], stopwords="en"
+            )
+            retriever = bm25s.BM25()
+            retriever.index(corpus_tokens)
+
+        parsed = file_count - cache_hits
+        print(
+            f"Indexed {len(directories)} dirs, {file_count} files "
+            f"({cache_hits} cached, {parsed} parsed), "
+            f"{len(corpus)} turns",
+            file=sys.stderr,
+        )
+
         with self._lock:
             self._corpus = corpus
             self._retriever = retriever
             self._conversations = conversations
             self._session_files = session_files
+            self._file_cache = new_cache
 
     def search(
         self,
@@ -574,8 +627,11 @@ class ConversationIndex:
 
 
 # ---------------------------------------------------------------------------
-# TASK 4: Filesystem Watching and CLI
+# Filesystem watching, MCP server, and CLI
 # ---------------------------------------------------------------------------
+
+_REINDEX_INTERVAL = 60.0  # seconds between reindexes
+
 
 class _ConvChangeHandler(FileSystemEventHandler):
     """Watches a project directory for JSONL changes and triggers reindex."""
@@ -585,17 +641,31 @@ class _ConvChangeHandler(FileSystemEventHandler):
         self._index = index
         self._debounce_timer: threading.Timer | None = None
         self._debounce_lock = threading.Lock()
+        self._reindex_pending = False
+        self._reindex_running = threading.Lock()
 
     def _schedule_reindex(self) -> None:
         with self._debounce_lock:
-            if self._debounce_timer is not None:
-                self._debounce_timer.cancel()
-            self._debounce_timer = threading.Timer(2.0, self._do_reindex)
+            if self._reindex_pending:
+                return  # Already queued — discard
+            self._reindex_pending = True
+            self._debounce_timer = threading.Timer(_REINDEX_INTERVAL, self._do_reindex)
             self._debounce_timer.daemon = True
             self._debounce_timer.start()
 
     def _do_reindex(self) -> None:
-        self._index.build(self._pattern)
+        with self._debounce_lock:
+            self._reindex_pending = False
+        if not self._reindex_running.acquire(blocking=False):
+            self._schedule_reindex()
+            return
+        try:
+            self._index.build(self._pattern)
+        except Exception:
+            import traceback
+            print(f"[conversation-search] reindex error: {traceback.format_exc()}", file=sys.stderr)
+        finally:
+            self._reindex_running.release()
 
     def _maybe_reindex(self, path: str) -> None:
         if not path.endswith(".jsonl"):
@@ -634,7 +704,7 @@ class _DirDiscoveryHandler(FileSystemEventHandler):
         with self._debounce_lock:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
-            self._debounce_timer = threading.Timer(2.0, self._do_check, args=(dir_path,))
+            self._debounce_timer = threading.Timer(5.0, self._do_check, args=(dir_path,))
             self._debounce_timer.daemon = True
             self._debounce_timer.start()
 

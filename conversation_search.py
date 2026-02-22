@@ -965,6 +965,77 @@ def _run_daemon(port: int = _DEFAULT_PORT, idle_timeout: float = _DEFAULT_IDLE_T
     daemon_server.run(transport="sse")
 
 
+def _run_connect(port: int = _DEFAULT_PORT, idle_timeout: float = _DEFAULT_IDLE_TIMEOUT) -> None:
+    """Launcher + stdio↔SSE bridge for MCP config.
+
+    Ensures the daemon is running (starts it if not), then bridges
+    Claude Code's stdio MCP protocol to the daemon's SSE endpoint.
+    Runs until the SSE connection closes or stdin reaches EOF.
+    """
+    import subprocess
+    import time
+    import anyio
+
+    sse_url = f"http://127.0.0.1:{port}/sse"
+
+    def _ensure_daemon_running() -> None:
+        """Start the daemon if not already healthy. Waits up to 30s for it to be ready."""
+        state = _read_daemon_state()
+        if state is not None:
+            pid, existing_port = state
+            if existing_port == port and _is_daemon_healthy(pid, existing_port):
+                return  # Already up
+
+        # Start daemon in background
+        print(f"[conversation-search] starting daemon on port {port}...", file=sys.stderr)
+        subprocess.Popen(
+            [
+                sys.executable,
+                __file__,
+                "daemon",
+                "--port", str(port),
+                "--idle-timeout", str(idle_timeout),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=sys.stderr,
+            start_new_session=True,
+        )
+
+        # Wait for port to respond (up to 30s)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if _is_port_responding(port):
+                return
+            time.sleep(0.5)
+
+        raise RuntimeError(
+            f"[conversation-search] daemon failed to start on port {port} within 30s"
+        )
+
+    _ensure_daemon_running()
+
+    # Bridge stdio ↔ SSE
+    from mcp.client.sse import sse_client
+    from mcp.server.stdio import stdio_server
+
+    async def _bridge() -> None:
+        async with stdio_server() as (stdio_read, stdio_write):
+            async with sse_client(sse_url) as (sse_read, sse_write):
+                async with anyio.create_task_group() as tg:
+                    async def forward_to_daemon() -> None:
+                        async for message in stdio_read:
+                            await sse_write.send(message)
+
+                    async def forward_to_client() -> None:
+                        async for message in sse_read:
+                            await stdio_write.send(message)
+
+                    tg.start_soon(forward_to_daemon)
+                    tg.start_soon(forward_to_client)
+
+    anyio.run(_bridge)
+
+
 def _register_tools(server: FastMCP, index: ConversationIndex) -> None:
     """Register the four MCP search tools on *server*, closing over *index*.
 

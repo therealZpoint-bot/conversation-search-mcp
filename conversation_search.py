@@ -1153,6 +1153,25 @@ def main() -> None:
         help=f"Seconds of inactivity before daemon exits (default: {_DEFAULT_IDLE_TIMEOUT})",
     )
 
+    # --- connect (launcher + stdio<->SSE bridge) ---
+    connect_parser = subparsers.add_parser(
+        "connect",
+        help="Ensure daemon is running and bridge stdio to it (use this in MCP config)",
+    )
+    connect_parser.add_argument(
+        "--port",
+        type=int,
+        default=_DEFAULT_PORT,
+        help=f"Daemon port (default: {_DEFAULT_PORT})",
+    )
+    connect_parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=_DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Idle timeout passed to daemon on spawn (default: {_DEFAULT_IDLE_TIMEOUT})",
+    )
+
     # --- search ---
     search_parser = subparsers.add_parser("search", help="Search conversations")
     search_parser.add_argument("--pattern", default="*")
@@ -1186,6 +1205,8 @@ def main() -> None:
         _run_mcp_server(args.pattern)
     elif args.command == "daemon":
         _run_daemon(port=args.port, idle_timeout=args.idle_timeout)
+    elif args.command == "connect":
+        _run_connect(port=args.port, idle_timeout=args.idle_timeout)
     else:
         index = ConversationIndex()
         index.build(args.pattern)

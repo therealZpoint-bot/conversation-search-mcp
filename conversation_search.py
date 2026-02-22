@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["bm25s", "mcp", "watchdog"]
+# dependencies = ["bm25s", "mcp", "uvicorn", "watchdog"]
 # ///
 """MCP server that indexes Claude Code JSONL conversation transcripts with BM25."""
 
@@ -729,6 +729,62 @@ class _DirDiscoveryHandler(FileSystemEventHandler):
             self._schedule_check(event.src_path)
 
 
+def _register_tools(server: FastMCP, index: ConversationIndex) -> None:
+    """Register the four MCP tools on the given FastMCP server instance."""
+
+    @server.tool()
+    def search_conversations(
+        query: str,
+        limit: int = 10,
+        session_id: str | None = None,
+        project: str | None = None,
+    ) -> str:
+        """BM25 keyword search across all conversation turns.
+
+        Args:
+            query: Search query string.
+            limit: Maximum number of results to return.
+            session_id: Optional filter to restrict results to a specific session.
+            project: Optional filter to restrict results to a specific project (substring match).
+        """
+        return json.dumps(index.search(query, limit, session_id, project))
+
+    @server.tool()
+    def list_conversations(project: str | None = None, limit: int = 50) -> str:
+        """List all indexed conversations with metadata.
+
+        Args:
+            project: Optional substring filter for project name.
+            limit: Maximum number of conversations to return.
+        """
+        return json.dumps(index.list_conversations(project, limit))
+
+    @server.tool()
+    def read_turn(session_id: str, turn_number: int) -> str:
+        """Read a specific turn from a conversation with full fidelity.
+
+        Args:
+            session_id: The session UUID to read from.
+            turn_number: Zero-based turn index.
+        """
+        return json.dumps(index.read_turn(session_id, turn_number))
+
+    @server.tool()
+    def read_conversation(
+        session_id: str,
+        offset: int = 0,
+        limit: int = 10,
+    ) -> str:
+        """Read multiple turns from a conversation.
+
+        Args:
+            session_id: The session UUID to read from.
+            offset: Zero-based starting turn index.
+            limit: Number of turns to return.
+        """
+        return json.dumps(index.read_conversation(session_id, offset, limit))
+
+
 def _run_mcp_server(pattern: str) -> None:
     """Start the MCP server with filesystem watchers."""
     index = ConversationIndex()
@@ -750,58 +806,7 @@ def _run_mcp_server(pattern: str) -> None:
     observer.start()
 
     # MCP tool registration — thin wrappers around index methods
-    @mcp_server.tool()
-    def search_conversations(
-        query: str,
-        limit: int = 10,
-        session_id: str | None = None,
-        project: str | None = None,
-    ) -> str:
-        """BM25 keyword search across all conversation turns.
-
-        Args:
-            query: Search query string.
-            limit: Maximum number of results to return.
-            session_id: Optional filter to restrict results to a specific session.
-            project: Optional filter to restrict results to a specific project (substring match).
-        """
-        return json.dumps(index.search(query, limit, session_id, project))
-
-    @mcp_server.tool()
-    def list_conversations(project: str | None = None, limit: int = 50) -> str:
-        """List all indexed conversations with metadata.
-
-        Args:
-            project: Optional substring filter for project name.
-            limit: Maximum number of conversations to return.
-        """
-        return json.dumps(index.list_conversations(project, limit))
-
-    @mcp_server.tool()
-    def read_turn(session_id: str, turn_number: int) -> str:
-        """Read a specific turn from a conversation with full fidelity.
-
-        Args:
-            session_id: The session UUID to read from.
-            turn_number: Zero-based turn index.
-        """
-        return json.dumps(index.read_turn(session_id, turn_number))
-
-    @mcp_server.tool()
-    def read_conversation(
-        session_id: str,
-        offset: int = 0,
-        limit: int = 10,
-    ) -> str:
-        """Read multiple turns from a conversation.
-
-        Args:
-            session_id: The session UUID to read from.
-            offset: Zero-based starting turn index.
-            limit: Number of turns to return.
-        """
-        return json.dumps(index.read_conversation(session_id, offset, limit))
-
+    _register_tools(mcp_server, index)
     mcp_server.run()
 
 

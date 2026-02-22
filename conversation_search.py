@@ -804,6 +804,153 @@ def _write_daemon_files(pid: int, port: int) -> None:
     (cache / "daemon.port").write_text(str(port))
 
 
+def _run_daemon(port: int = _DEFAULT_PORT, idle_timeout: float = _DEFAULT_IDLE_TIMEOUT) -> None:
+    """Start the SSE daemon process.
+
+    Checks for an existing healthy daemon first. If one exists, exits immediately.
+    Otherwise builds the index, starts watchers, and runs the SSE server.
+    Writes PID and port to ~/.cache/conversation-search/.
+    Exits after idle_timeout seconds with no MCP tool calls.
+    """
+    import signal
+    import time
+
+    # Check for existing daemon
+    state = _read_daemon_state()
+    if state is not None:
+        pid, existing_port = state
+        if _is_daemon_healthy(pid, existing_port):
+            print(
+                f"[conversation-search] daemon already running (PID {pid}, port {existing_port})",
+                file=sys.stderr,
+            )
+            return
+        # Stale files — clean up
+        print("[conversation-search] cleaning up stale daemon files", file=sys.stderr)
+        _cleanup_daemon_files()
+
+    # Build index (always full corpus)
+    index = ConversationIndex()
+    index.build("*")
+
+    # Start filesystem watchers
+    conv_handler = _ConvChangeHandler("*", index)
+    observer = Observer()
+    observer.daemon = True
+
+    directories = _discover_directories("*")
+    for d in directories:
+        observer.schedule(conv_handler, str(d), recursive=False)
+
+    dir_discovery = _DirDiscoveryHandler("*", observer, conv_handler)
+    dir_discovery._watched_dirs = {str(d) for d in directories}
+    observer.schedule(dir_discovery, str(_PROJECTS_ROOT), recursive=False)
+    observer.start()
+
+    # Idle timeout tracking
+    last_activity = [time.monotonic()]  # list so closure can mutate it
+
+    def touch_activity() -> None:
+        last_activity[0] = time.monotonic()
+
+    def idle_watcher() -> None:
+        while True:
+            time.sleep(60)
+            if time.monotonic() - last_activity[0] > idle_timeout:
+                print(
+                    f"[conversation-search] idle timeout ({idle_timeout}s), shutting down",
+                    file=sys.stderr,
+                )
+                _cleanup_daemon_files()
+                os._exit(0)
+
+    idle_thread = threading.Thread(target=idle_watcher, daemon=True)
+    idle_thread.start()
+
+    # Build SSE FastMCP server
+    daemon_server = FastMCP(
+        "conversation-search",
+        instructions=mcp_server.instructions,
+        host="127.0.0.1",
+        port=port,
+    )
+
+    # Register tools with activity tracking
+    @daemon_server.tool()
+    def search_conversations(
+        query: str,
+        limit: int = 10,
+        session_id: str | None = None,
+        project: str | None = None,
+    ) -> str:
+        """BM25 keyword search across all conversation turns.
+
+        Args:
+            query: Search query string.
+            limit: Maximum number of results to return.
+            session_id: Optional filter to restrict results to a specific session.
+            project: Optional filter to restrict results to a specific project (substring match).
+        """
+        touch_activity()
+        return json.dumps(index.search(query, limit, session_id, project))
+
+    @daemon_server.tool()
+    def list_conversations(project: str | None = None, limit: int = 50) -> str:
+        """List all indexed conversations with metadata.
+
+        Args:
+            project: Optional substring filter for project name.
+            limit: Maximum number of conversations to return.
+        """
+        touch_activity()
+        return json.dumps(index.list_conversations(project, limit))
+
+    @daemon_server.tool()
+    def read_turn(session_id: str, turn_number: int) -> str:
+        """Read a specific turn from a conversation with full fidelity.
+
+        Args:
+            session_id: The session UUID to read from.
+            turn_number: Zero-based turn index.
+        """
+        touch_activity()
+        return json.dumps(index.read_turn(session_id, turn_number))
+
+    @daemon_server.tool()
+    def read_conversation(
+        session_id: str,
+        offset: int = 0,
+        limit: int = 10,
+    ) -> str:
+        """Read multiple turns from a conversation.
+
+        Args:
+            session_id: The session UUID to read from.
+            offset: Zero-based starting turn index.
+            limit: Number of turns to return.
+        """
+        touch_activity()
+        return json.dumps(index.read_conversation(session_id, offset, limit))
+
+    # Write PID/port files and register cleanup
+    _write_daemon_files(os.getpid(), port)
+
+    def _shutdown(signum: int, frame: object) -> None:
+        print(f"[conversation-search] daemon shutting down (signal {signum})", file=sys.stderr)
+        _cleanup_daemon_files()
+        observer.stop()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    import atexit
+    atexit.register(_cleanup_daemon_files)
+
+    print(f"[conversation-search] daemon starting on http://127.0.0.1:{port}", file=sys.stderr)
+    daemon_server.run(transport="sse")
+
+
 def _register_tools(server: FastMCP, index: ConversationIndex) -> None:
     """Register the four MCP search tools on *server*, closing over *index*.
 

@@ -12,6 +12,7 @@ import fnmatch
 import json
 import os
 import re
+import socket
 import sys
 import threading
 from pathlib import Path
@@ -759,17 +760,22 @@ def _read_daemon_state() -> tuple[int, int] | None:
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """Return True if process with given PID exists."""
+    """Return True if a process with the given PID exists.
+
+    PermissionError means the process exists but is owned by another user —
+    still considered alive. ProcessLookupError means no such process.
+    """
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        return True  # process exists, owned by another user
     except (OSError, ProcessLookupError):
         return False
 
 
 def _is_port_responding(port: int) -> bool:
     """Return True if something is listening on localhost:port."""
-    import socket
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=1):
             return True
@@ -792,7 +798,7 @@ def _cleanup_daemon_files() -> None:
 
 
 def _write_daemon_files(pid: int, port: int) -> None:
-    """Write PID and port to cache dir."""
+    """Write PID and port to cache dir. Not atomic — callers tolerate partial writes."""
     cache = _daemon_cache_dir()
     (cache / "daemon.pid").write_text(str(pid))
     (cache / "daemon.port").write_text(str(port))

@@ -1066,6 +1066,22 @@ def main() -> None:
         help="Glob pattern for project directories under ~/.claude/projects/ (default: '*')",
     )
 
+    # --- daemon (SSE server mode) ---
+    daemon_parser = subparsers.add_parser("daemon", help="Run as persistent SSE daemon")
+    daemon_parser.add_argument(
+        "--port",
+        type=int,
+        default=_DEFAULT_PORT,
+        help=f"Localhost port for SSE server (default: {_DEFAULT_PORT})",
+    )
+    daemon_parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=_DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Seconds of inactivity before daemon exits (default: {_DEFAULT_IDLE_TIMEOUT})",
+    )
+
     # --- search ---
     search_parser = subparsers.add_parser("search", help="Search conversations")
     search_parser.add_argument("--pattern", default="*")
@@ -1097,6 +1113,8 @@ def main() -> None:
 
     if args.command == "serve":
         _run_mcp_server(args.pattern)
+    elif args.command == "daemon":
+        _run_daemon(port=args.port, idle_timeout=args.idle_timeout)
     else:
         index = ConversationIndex()
         index.build(args.pattern)

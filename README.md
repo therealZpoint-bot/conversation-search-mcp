@@ -19,19 +19,19 @@ Claude Code stores conversation transcripts as JSONL files under `~/.claude/proj
 1. Discovers matching project directories via glob pattern
 2. Parses JSONL into turns (user message + assistant response + tool calls)
 3. Builds a BM25 index over the corpus
-4. Watches the filesystem for changes and reindexes with 2s debounce
-5. Serves 4 MCP tools over stdio
+4. Watches the filesystem for changes and reindexes (60s debounce)
+5. Serves 4 MCP tools via stdio (`serve`) or SSE (`daemon`)
 
 ## Requirements
 
 - Python >= 3.10
 - [`uv`](https://docs.astral.sh/uv/) (dependencies are managed via PEP 723 inline metadata)
 
-No venv or manual install needed. `uv run` handles `bm25s`, `mcp`, and `watchdog` automatically.
+No venv or manual install needed. `uv run` handles `bm25s`, `mcp`, `uvicorn`, and `watchdog` automatically.
 
 ## Configuration
 
-Add to `.mcp.json` (project-level or `~/.claude/.mcp.json` for global):
+Add to your MCP configuration — either project-level (`.mcp.json`) or global (`~/.claude.json` under the `mcpServers` key):
 
 ```json
 {
@@ -44,7 +44,7 @@ Add to `.mcp.json` (project-level or `~/.claude/.mcp.json` for global):
 }
 ```
 
-The `--pattern` flag is **required**. It's a glob matched against directory names under `~/.claude/projects/`. Examples:
+The `--pattern` flag controls which project directories under `~/.claude/projects/` are indexed. It defaults to `*` (all projects) if omitted. Examples:
 
 | Pattern | Scope |
 |---------|-------|
@@ -52,7 +52,7 @@ The `--pattern` flag is **required**. It's a glob matched against directory name
 | `-home-gbr-work-001-sites*` | All sites projects |
 | `-home-gbr-work-ai-*` | All AI projects |
 
-Restart Claude Code after editing `.mcp.json`.
+Restart Claude Code after changing MCP configuration.
 
 ## CLI Usage
 
@@ -125,13 +125,13 @@ Both flags work on `daemon` and `connect` subcommands.
 Claude Code session A ──┐
 Claude Code session B ──┼── connect (stdio↔SSE bridge) ──► daemon (SSE on localhost:9237)
 Claude Code session C ──┘                                       │
-                                                          • one BM25 index (~225 MB)
+                                                          • one BM25 index (~250 MB)
                                                           • one inotify watcher set
                                                           • one reindex loop
 ```
 
-**Without daemon:** N sessions × ~225 MB RAM, N reindex cycles per file change.
-**With daemon:** 1 × ~225 MB regardless of session count.
+**Without daemon:** N sessions × ~250 MB RAM, N reindex cycles per file change.
+**With daemon:** 1 × ~250 MB regardless of session count.
 
 ## Tools
 

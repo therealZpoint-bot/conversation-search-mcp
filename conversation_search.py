@@ -68,6 +68,27 @@ _SESSION_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 
+
+def _normalize_pattern(pattern: str) -> str:
+    """Normalize a --pattern value to encoded directory name format.
+
+    If the pattern contains '/', treat it as a filesystem path and encode it
+    to match Claude Code's directory naming (replace '/' with '-', '.' with '-').
+    Glob wildcards survive encoding. Otherwise return unchanged (backward compat).
+    """
+    if "/" not in pattern:
+        return pattern
+    pattern = pattern.rstrip("/")
+    if not pattern:
+        return "*"
+    pattern = os.path.expanduser(pattern)
+    # Resolve . and .. segments without requiring the path to exist.
+    # os.path.realpath would resolve symlinks (undesirable for glob patterns
+    # with wildcards), so we use os.path.normpath instead.
+    pattern = os.path.normpath(pattern)
+    return pattern.replace("/", "-").replace(".", "-")
+
+
 # ---------------------------------------------------------------------------
 # JSONL parsing and turn construction
 # ---------------------------------------------------------------------------
@@ -1498,6 +1519,8 @@ def main() -> None:
     rc_parser.add_argument("--limit", "-n", type=int, default=10)
 
     args = parser.parse_args()
+    if hasattr(args, "pattern"):
+        args.pattern = _normalize_pattern(args.pattern)
 
     if args.command == "serve":
         _run_mcp_server(args.pattern)

@@ -51,6 +51,16 @@ Add to your MCP configuration — either project-level (`.mcp.json`) or global (
 
 `connect` starts a shared daemon on first use and reuses it across sessions (see [Daemon Mode](#daemon-mode-recommended-for-multiple-sessions)). For standalone stdio mode (one index per session), replace `connect` with `serve`.
 
+The `--pattern` flag controls which project directories under `~/.claude/projects/` are indexed. It defaults to `*` (all projects) if omitted. Patterns containing `/` are treated as filesystem paths and auto-converted to the encoded directory name format.
+
+| Pattern | Scope |
+|---------|-------|
+| `*` | All projects |
+| `~/repos/openclaw` | Single project |
+| `~/repos/*` | All repos projects |
+| `~/repos/open*` | Projects starting with "open" |
+| `--pattern="-home-claude-repos-*"` | Encoded format (requires `=` syntax for leading `-`) |
+
 Restart Claude Code after changing MCP configuration.
 
 ## CLI Usage

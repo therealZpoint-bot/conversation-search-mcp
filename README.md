@@ -6,11 +6,13 @@ Based on [Searchable Agent Memory in a Single File](https://eric-tramel.github.i
 
 ## Development process
 
-The implementation was produced by Claude Code following a structured pipeline:
+The initial implementation was produced by Claude Code following a structured pipeline:
 
 1. **PRD** (`ai-docs/features/001-conversation-search-mcp.md`) — requirements and design decisions
 2. **Build spec** (`specs/conversation-search-mcp.md`) — generated from the PRD, containing exact function signatures, filtering rules, acceptance criteria, and validation commands
 3. **Implementation** (`conversation_search.py`) — written by Claude Code using the build spec as instructions
+
+The search backend was later migrated from in-memory bm25s to SQLite FTS5 (`specs/fts5-migration.md`), peer-reviewed by Claude (Opus 4.6) and Codex (GPT-5.4), and executed as 5 sequential subagent tasks.
 
 ## How it works
 
@@ -127,7 +129,7 @@ Claude Code session A ──┐
 Claude Code session B ──┼── connect (stdio↔SSE bridge) ──► daemon (SSE on localhost:9237)
 Claude Code session C ──┘                                       │
                                                           • one FTS5 index (~10 MB)
-                                                          • one inotify watcher set
+                                                          • one filesystem watcher
                                                           • one reindex loop
 ```
 

@@ -17,6 +17,64 @@ from conftest import cs, SAMPLE_RECORDS, SAMPLE_SESSION_ID
 
 
 # ---------------------------------------------------------------------------
+# Pattern normalization
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizePattern:
+    """Tests for _normalize_pattern path-to-encoded-name conversion."""
+
+    def test_wildcard_unchanged(self):
+        assert cs._normalize_pattern("*") == "*"
+
+    def test_encoded_pattern_unchanged(self):
+        assert cs._normalize_pattern("-home-claude-repos-*") == "-home-claude-repos-*"
+
+    def test_absolute_path(self):
+        assert cs._normalize_pattern("/home/claude/repos/openclaw") == "-home-claude-repos-openclaw"
+
+    def test_tilde_expansion(self):
+        with unittest.mock.patch("os.path.expanduser", return_value="/home/claude/repos/openclaw"):
+            assert cs._normalize_pattern("~/repos/openclaw") == "-home-claude-repos-openclaw"
+
+    def test_trailing_slash(self):
+        assert cs._normalize_pattern("/home/claude/repos/openclaw/") == "-home-claude-repos-openclaw"
+
+    def test_glob_wildcard_in_path(self):
+        assert cs._normalize_pattern("/home/claude/repos/*") == "-home-claude-repos-*"
+
+    def test_prefix_glob(self):
+        assert cs._normalize_pattern("/home/claude/repos/open*") == "-home-claude-repos-open*"
+
+    def test_dot_component_double_dash(self):
+        assert cs._normalize_pattern("/home/claude/.openclaw/workspace") == "-home-claude--openclaw-workspace"
+
+    def test_empty_string(self):
+        assert cs._normalize_pattern("") == ""
+
+    def test_root_slash_becomes_wildcard(self):
+        assert cs._normalize_pattern("/") == "*"
+
+    def test_relative_dot_slash(self):
+        # normpath resolves ./repos/openclaw to repos/openclaw (relative),
+        # which encodes without a leading dash. Won't match any Claude Code
+        # directory (those always start with -), but it's consistent encoding.
+        result = cs._normalize_pattern("./repos/openclaw")
+        assert result == "repos-openclaw"
+
+    def test_relative_dotdot_slash(self):
+        result = cs._normalize_pattern("/home/claude/../claude/repos/openclaw")
+        assert result == "-home-claude-repos-openclaw"
+
+    def test_redundant_slashes(self):
+        result = cs._normalize_pattern("/home//claude///repos/openclaw")
+        assert result == "-home-claude-repos-openclaw"
+
+    def test_no_slash_passthrough(self):
+        assert cs._normalize_pattern("-home-*") == "-home-*"
+
+
+# ---------------------------------------------------------------------------
 # Additional sample data for cross-session tests
 # ---------------------------------------------------------------------------
 

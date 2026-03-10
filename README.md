@@ -47,13 +47,15 @@ Add to your MCP configuration — either project-level (`.mcp.json`) or global (
 }
 ```
 
-The `--pattern` flag controls which project directories under `~/.claude/projects/` are indexed. It defaults to `*` (all projects) if omitted. Examples:
+The `--pattern` flag controls which project directories under `~/.claude/projects/` are indexed. It defaults to `*` (all projects) if omitted. Patterns containing `/` are treated as filesystem paths and auto-converted to the encoded directory name format.
 
 | Pattern | Scope |
 |---------|-------|
 | `*` | All projects |
-| `-home-gbr-work-001-sites*` | All sites projects |
-| `-home-gbr-work-ai-*` | All AI projects |
+| `~/repos/openclaw` | Single project |
+| `~/repos/*` | All repos projects |
+| `~/repos/open*` | Projects starting with "open" |
+| `--pattern="-home-claude-repos-*"` | Encoded format (requires `=` syntax for leading `-`) |
 
 Restart Claude Code after changing MCP configuration.
 
